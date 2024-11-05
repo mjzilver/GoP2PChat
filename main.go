@@ -18,10 +18,21 @@ type peer struct {
 	nick string
 }
 
+type MessageType string
+
+const (
+	ChatMessage   MessageType = "chat"
+	NickRequest   MessageType = "nick_request"
+	NickResponse  MessageType = "nick_response"
+	ErrorMessage  MessageType = "error"
+	SystemMessage MessageType = "system"
+)
+
 type message struct {
-	Text      string    `json:"text"`
-	Timestamp time.Time `json:"timestamp"`
-	Nick      string    `json:"nick"`
+	Text      string      `json:"text"`
+	Timestamp time.Time   `json:"timestamp"`
+	Nick      string      `json:"nick"`
+	Type      MessageType `json:"type"`
 }
 
 func (m message) String() string {
@@ -100,7 +111,16 @@ func startUDPServer(localAddr string, p *tea.Program, m *model) {
 			continue
 		}
 
-		p.Send(NewMessageMsg{msg: msg})
+		switch msg.Type {
+
+		case NickRequest:
+			m.peer.nick = msg.Nick
+			m.sendNickResponse()
+		case NickResponse:
+			m.peer.nick = msg.Nick
+		case ErrorMessage, SystemMessage, ChatMessage:
+			p.Send(NewMessageMsg{msg: msg})
+		}
 	}
 }
 
@@ -155,6 +175,9 @@ func (m *model) handleCommand() error {
 	case strings.HasPrefix(m.input, "/connect "):
 		peerAddr := strings.TrimPrefix(m.input, "/connect ")
 		m.peer.addr = peerAddr
+
+		m.sendNickRequest()
+		m.sendNickResponse()
 		return nil
 
 	case m.input == "/help":
@@ -170,6 +193,7 @@ func (m *model) handleCommand() error {
 			Text:      m.input,
 			Timestamp: time.Now(),
 			Nick:      m.nick,
+			Type:      ChatMessage,
 		}
 
 		go sendMessage(m, newMsg)
@@ -216,7 +240,11 @@ func (m *model) View() string {
 
 	mainBody := lipgloss.JoinHorizontal(lipgloss.Top, chatStyle.Render(m.renderMessages()), peerListStyle.Render(m.renderPeers()))
 
-	return lipgloss.JoinVertical(lipgloss.Top, titleStyle.Render(title), mainBody, inputStyle.Render(m.renderInput()))
+	return lipgloss.JoinVertical(lipgloss.Top, titleStyle.Render(m.renderTitle()), mainBody, inputStyle.Render(m.renderInput()))
+}
+
+func (m *model) renderTitle() string {
+	return title + " - Connected as: " + m.nick
 }
 
 func (m *model) renderMessages() string {
@@ -247,6 +275,7 @@ func (m *model) sendError(err string) {
 			Text:      err,
 			Timestamp: time.Now(),
 			Nick:      "Error",
+			Type:      ErrorMessage,
 		},
 	})
 }
@@ -257,6 +286,7 @@ func (m *model) sendHelp() {
 			Text:      helpMsg,
 			Timestamp: time.Now(),
 			Nick:      "System",
+			Type:      SystemMessage,
 		},
 	})
 }
@@ -267,8 +297,39 @@ func (m *model) sendWelcome() {
 			Text:      welcomeMsg,
 			Timestamp: time.Now(),
 			Nick:      "System",
+			Type:      SystemMessage,
 		},
 	})
+}
+
+func (m *model) sendNickRequest() {
+	if m.peer.addr == "" {
+		m.sendError("No peer address set. Use /connect <peer-address>")
+		return
+	}
+
+	msg := message{
+		Type:      NickRequest,
+		Timestamp: time.Now(),
+		Nick:      m.nick,
+	}
+
+	go sendMessage(m, msg)
+}
+
+func (m *model) sendNickResponse() {
+	if m.peer.addr == "" {
+		m.sendError("No peer address set. Use /connect <peer-address>")
+		return
+	}
+
+	msg := message{
+		Type:      NickResponse,
+		Timestamp: time.Now(),
+		Nick:      m.nick,
+	}
+
+	go sendMessage(m, msg)
 }
 
 func sendMessage(m *model, msg message) {
