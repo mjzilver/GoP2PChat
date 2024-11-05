@@ -55,15 +55,18 @@ func main() {
 		nick: defaultNick,
 	}
 
-	go startUDPServer(localAddr, &m)
-
+	// Create the Bubble Tea program
 	p := tea.NewProgram(&m)
+
+	// Start UDP server in a goroutine, passing the program reference
+	go startUDPServer(localAddr, p)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error starting program: %v\n", err)
 	}
 }
 
-func startUDPServer(localAddr string, m *model) {
+func startUDPServer(localAddr string, p *tea.Program) {
 	addr, err := net.ResolveUDPAddr("udp", localAddr)
 	if err != nil {
 		fmt.Printf("Failed to resolve address %s: %v\n", localAddr, err)
@@ -93,23 +96,14 @@ func startUDPServer(localAddr string, m *model) {
 			continue
 		}
 
-		// Add the message to the model
-		message := message{
-			Text:      msg.Text,
-			Timestamp: msg.Timestamp,
-			Nick:      msg.Nick,
-		}
-
-		m.mu.Lock()
-		m.messages = append(m.messages, message)
-		m.mu.Unlock()
-
-		// Update the terminal
-		m.Update(newMessageMsg{})
+		// Send the message to the Bubble Tea program
+		p.Send(NewMessageMsg{msg: msg})
 	}
 }
 
-type newMessageMsg struct{}
+type NewMessageMsg struct {
+	msg message
+}
 
 func (m *model) Init() tea.Cmd {
 	return nil
@@ -121,30 +115,57 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "backspace":
+			if len(m.input) > 0 {
+				m.input = m.input[:len(m.input)-1]
+			}
 		case "enter":
 			if m.input != "" {
+				// if starts with / send to commands function
+
 				if strings.HasPrefix(m.input, "/nick ") {
 					m.nick = strings.TrimPrefix(m.input, "/nick ")
 					m.input = ""
 					return m, nil
 				}
 
-				message := message{
+				if strings.HasPrefix(m.input, "/connect") {
+					// connect to a different peer
+					// example: /connect 192.168.1.1:3000
+					peerAddr := strings.TrimPrefix(m.input, "/connect ")
+					m.peer.addr = peerAddr
+
+					m.input = ""
+					return m, nil
+				}
+
+				if m.nick == defaultNick {
+					fmt.Println("Please set a nickname first. Use /nick <nickname>")
+					m.input = ""
+					return m, nil
+				}
+
+				newMsg := message{
 					Text:      m.input,
 					Timestamp: time.Now(),
 					Nick:      m.nick,
 				}
 
-				go sendMessage(m, message)
+				go sendMessage(m, newMsg)
+
+				m.mu.Lock()
+				m.messages = append(m.messages, newMsg)
+				m.mu.Unlock()
+
 				m.input = ""
 			}
 		default:
 			m.input += msg.String()
 		}
-
-	case newMessageMsg:
-		// This message is sent from the UDP server goroutine
-		// to update the terminal with a new message
+	case NewMessageMsg:
+		m.mu.Lock()
+		m.messages = append(m.messages, msg.msg)
+		m.mu.Unlock()
 		return m, nil
 	}
 	return m, nil
@@ -154,10 +175,12 @@ func (m *model) View() string {
 	var b strings.Builder
 	b.WriteString("P2P Chat\n\n")
 
-	for _, message := range m.messages {
-		b.WriteString(message.String())
+	m.mu.Lock()
+	for _, msg := range m.messages {
+		b.WriteString(msg.String())
 		b.WriteString("\n")
 	}
+	m.mu.Unlock()
 
 	b.WriteString("\n> " + m.input)
 	return b.String()
@@ -171,13 +194,7 @@ func sendMessage(m *model, msg message) {
 	}
 	defer conn.Close()
 
-	message := message{
-		Text:      msg.Text,
-		Timestamp: msg.Timestamp,
-		Nick:      m.nick,
-	}
-
-	msgBytes, err := json.Marshal(message)
+	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		fmt.Println("Error marshaling message:", err)
 		return
